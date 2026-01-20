@@ -6,6 +6,9 @@ import re
 import io
 from PIL import Image
 
+# -------------------------------------------------
+# Page setup
+# -------------------------------------------------
 st.set_page_config(page_title="RFQ → Important Bits")
 st.title("📄 RFQ → Important Bits")
 
@@ -20,29 +23,32 @@ uploaded_file = st.file_uploader(
 def clean(text):
     return re.sub(r"\s+", " ", text.lower()).strip()
 
-# ---------- PDF ----------
+# -------------------------------------------------
+# PDF extraction (TEXT + FULL PAGE IMAGES)
+# -------------------------------------------------
 def extract_pdf_text_and_images(file):
     doc = fitz.open(stream=file.read(), filetype="pdf")
     text = ""
     images = []
 
-    for page in doc:
+    for page_number, page in enumerate(doc):
+        # extract text
         text += page.get_text()
 
-        for img in page.get_images(full=True):
-            xref = img[0]
-            pix = fitz.Pixmap(doc, xref)
-            if pix.n < 5:
-                images.append(Image.open(io.BytesIO(pix.tobytes())))
-            pix = None
+        # render full page as image (key browser-safe trick)
+        pix = page.get_pixmap(dpi=150)
+        img = Image.open(io.BytesIO(pix.tobytes("png")))
+        images.append(img)
 
     return text, images
 
-# ---------- DOCX ----------
+# -------------------------------------------------
+# DOCX extraction (TEXT + TABLES + IMAGES)
+# -------------------------------------------------
 def extract_docx_text_tables_images(file):
     doc = docx.Document(file)
     text = ""
-    tables = []
+    table_rows = []
     images = []
 
     # paragraphs
@@ -54,16 +60,16 @@ def extract_docx_text_tables_images(file):
         for row in table.rows:
             cells = [c.text.strip() for c in row.cells]
             if len(cells) >= 2:
-                tables.append((clean(cells[0]), cells[1]))
+                table_rows.append((clean(cells[0]), cells[1]))
 
-    # images
+    # embedded images (only real images, cloud-safe)
     with zipfile.ZipFile(file) as z:
         for name in z.namelist():
             if name.startswith("word/media/"):
                 img = Image.open(io.BytesIO(z.read(name)))
                 images.append(img)
 
-    return text, tables, images
+    return text, table_rows, images
 
 # -------------------------------------------------
 # Field extraction rules
@@ -88,7 +94,7 @@ def extract_fields(text, table_rows):
     for field, keys in FIELDS.items():
         value = "Not found"
 
-        # table first
+        # table-first logic
         for k, v in table_rows:
             for key in keys:
                 if key in k:
@@ -97,12 +103,12 @@ def extract_fields(text, table_rows):
             if value != "Not found":
                 break
 
-        # fallback to paragraph search
+        # fallback to paragraph text
         if value == "Not found":
             for key in keys:
                 if key in text_clean:
                     idx = text_clean.find(key)
-                    value = text[idx:idx+300].replace("\n", " ").strip()
+                    value = text[idx:idx + 300].replace("\n", " ").strip()
                     break
 
         results[field] = value
@@ -110,28 +116,28 @@ def extract_fields(text, table_rows):
     return results
 
 # -------------------------------------------------
-# Main
+# Main app
 # -------------------------------------------------
 if uploaded_file:
+    text = ""
+    table_rows = []
     images = []
-    tables = []
 
     if uploaded_file.type == "application/pdf":
         text, images = extract_pdf_text_and_images(uploaded_file)
     else:
-        text, tables, images = extract_docx_text_tables_images(uploaded_file)
+        text, table_rows, images = extract_docx_text_tables_images(uploaded_file)
 
-    fields = extract_fields(text, tables)
+    fields = extract_fields(text, table_rows)
 
     st.subheader("📌 Extracted Fields")
     for k, v in fields.items():
         st.markdown(f"**{k}:** {v}")
         st.divider()
 
-    st.subheader("📷 Extracted Images")
+    st.subheader("🖼️ Extracted Visuals")
     if images:
         for i, img in enumerate(images):
-            st.image(img, caption=f"Image {i+1}", use_column_width=True)
+            st.image(img, caption=f"Image / Page {i + 1}", use_column_width=True)
     else:
         st.write("No images found.")
-
