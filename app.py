@@ -23,27 +23,39 @@ uploaded_file = st.file_uploader(
 def clean(text):
     return re.sub(r"\s+", " ", text.lower()).strip()
 
+def safe_image(img):
+    try:
+        img = img.convert("RGB")
+        if img.width > 2000:
+            ratio = 2000 / img.width
+            img = img.resize(
+                (2000, int(img.height * ratio)),
+                Image.LANCZOS
+            )
+        return img
+    except Exception:
+        return None
+
 # -------------------------------------------------
-# PDF extraction (TEXT + FULL PAGE IMAGES)
+# PDF extraction
 # -------------------------------------------------
 def extract_pdf_text_and_images(file):
     doc = fitz.open(stream=file.read(), filetype="pdf")
     text = ""
     images = []
 
-    for page_number, page in enumerate(doc):
-        # extract text
+    for page in doc:
         text += page.get_text()
-
-        # render full page as image (key browser-safe trick)
-        pix = page.get_pixmap(dpi=150)
+        pix = page.get_pixmap(dpi=120)
         img = Image.open(io.BytesIO(pix.tobytes("png")))
-        images.append(img)
+        img = safe_image(img)
+        if img:
+            images.append(img)
 
     return text, images
 
 # -------------------------------------------------
-# DOCX extraction (TEXT + TABLES + IMAGES)
+# DOCX extraction
 # -------------------------------------------------
 def extract_docx_text_tables_images(file):
     doc = docx.Document(file)
@@ -51,32 +63,31 @@ def extract_docx_text_tables_images(file):
     table_rows = []
     images = []
 
-    # paragraphs
     for p in doc.paragraphs:
         text += p.text + "\n"
 
-    # tables
     for table in doc.tables:
         for row in table.rows:
             cells = [c.text.strip() for c in row.cells]
             if len(cells) >= 2:
                 table_rows.append((clean(cells[0]), cells[1]))
 
-    # embedded images (only real images, cloud-safe)
     with zipfile.ZipFile(file) as z:
         for name in z.namelist():
             if name.startswith("word/media/"):
                 img = Image.open(io.BytesIO(z.read(name)))
-                images.append(img)
+                img = safe_image(img)
+                if img:
+                    images.append(img)
 
     return text, table_rows, images
 
 # -------------------------------------------------
-# Field extraction rules
+# Field extraction
 # -------------------------------------------------
 FIELDS = {
     "Project Title": ["project title"],
-    "Description of Work": ["description of work", "brief description"],
+    "Description of Work": ["description of work"],
     "RFQ Close": ["rfq close"],
     "Proposed Start Date": ["proposed start date", "start date"],
     "Proposed Completion Date": ["proposed completion date", "completion date"],
@@ -94,7 +105,6 @@ def extract_fields(text, table_rows):
     for field, keys in FIELDS.items():
         value = "Not found"
 
-        # table-first logic
         for k, v in table_rows:
             for key in keys:
                 if key in k:
@@ -103,7 +113,6 @@ def extract_fields(text, table_rows):
             if value != "Not found":
                 break
 
-        # fallback to paragraph text
         if value == "Not found":
             for key in keys:
                 if key in text_clean:
@@ -116,7 +125,7 @@ def extract_fields(text, table_rows):
     return results
 
 # -------------------------------------------------
-# Main app
+# Main
 # -------------------------------------------------
 if uploaded_file:
     text = ""
@@ -138,6 +147,6 @@ if uploaded_file:
     st.subheader("🖼️ Extracted Visuals")
     if images:
         for i, img in enumerate(images):
-            st.image(img, caption=f"Image / Page {i + 1}", use_column_width=True)
+            st.image(img, caption=f"Image / Page {i + 1}", use_container_width=True)
     else:
-        st.write("No images found.")
+        st.info("No images detected.")
