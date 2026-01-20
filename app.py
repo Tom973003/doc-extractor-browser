@@ -5,72 +5,78 @@ import io
 import zipfile
 from PIL import Image
 
-st.set_page_config(page_title="RFQ Document Extractor", layout="wide")
-
-st.title("📄 RFQ Document Extractor")
-st.write("Upload an RFQ PDF to extract structured fields and attachments.")
+st.set_page_config(page_title="RFQ Extractor", layout="wide")
+st.title("📄 RFQ Structured Extractor")
 
 uploaded_file = st.file_uploader("Upload RFQ PDF", type=["pdf"])
 
-# ---------------- FIELD PATTERNS ----------------
-FIELD_PATTERNS = {
-    "Project Title": r"^(Emergency.*|Project Title.*|.+Repair)",
-    "Description of Work": r"Description of Works?:?(.*?)(?:\n\n|$)",
-    "RFQ Close": r"RFQ Close:? *(.*)",
-    "Proposed Start Date": r"Proposed Start Date:? *(.*)",
-    "Proposed Completion Date": r"Proposed Completion Date:? *(.*)",
-    "Site Location": r"(P\d[-–]\d.*|Site Location:? *(.*))",
-    "LRD": r"\bLRD\b[: ]*(Yes|No|Y|N)?",
-    "Inc": r"\bInc\b[: ]*(Yes|No|Y|N)?",
-    "Tas": r"\bTas\b[: ]*(Yes|No|Y|N)?",
-    "Practical Work": r"Practical Work:? *(.*)",
-}
+# ---------------- HELPERS ----------------
 
-# ---------------- PDF EXTRACTION ----------------
-def extract_pdf(pdf_bytes):
+def clean(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+def extract_fields(text):
+    fields = {
+        "Project title": r"(Emergency .*? Repair|Emergency Maintenance .*? Repair)",
+        "Description of work": r"Brief Description of Works:? (.*?)(?:Date Created|$)",
+        "RFQ close": r"RFQ Close:? *(.*)",
+        "Proposed start date": r"Proposed Start Date:? *(.*)",
+        "Proposed completion date": r"Proposed Completion Date:? *(.*)",
+        "Site location": r"(P\d[-–]\d.*?)(?:\n|$)",
+        "LRD": r"\bLRD\b[: ]*(Yes|No|Y|N)?",
+        "Inc": r"\bInc\b[: ]*(Yes|No|Y|N)?",
+        "Tas": r"\bTas\b[: ]*(Yes|No|Y|N)?",
+        "Practical work": r"Practical Work:? *(.*)",
+    }
+
+    results = {}
+    for k, pattern in fields.items():
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        results[k] = clean(match.group(1)) if match else "Not found"
+    return results
+
+def extract_images(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    text = ""
     images = []
 
-    for page_index, page in enumerate(doc):
-        text += page.get_text() + "\n"
-
-        for img_index, img in enumerate(page.get_images(full=True)):
+    for page_i, page in enumerate(doc):
+        for img_i, img in enumerate(page.get_images(full=True)):
             xref = img[0]
             base = doc.extract_image(xref)
+
+            # FILTER ICONS / TINY IMAGES
+            if base["width"] < 300 or base["height"] < 300:
+                continue
+
             images.append({
-                "page": page_index + 1,
-                "index": img_index + 1,
+                "page": page_i + 1,
                 "bytes": base["image"],
                 "ext": base["ext"]
             })
 
-    return text, images
-
-def extract_fields(text):
-    results = {}
-    for field, pattern in FIELD_PATTERNS.items():
-        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-        results[field] = match.group(1).strip() if match and match.group(1) else "—"
-    return results
+    return images
 
 # ---------------- MAIN ----------------
-if uploaded_file:
-    with st.spinner("Extracting RFQ details…"):
-        raw_text, images = extract_pdf(uploaded_file.read())
-        fields = extract_fields(raw_text)
 
-    # -------- STRUCTURED FIELDS --------
+if uploaded_file:
+    pdf_bytes = uploaded_file.read()
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    full_text = ""
+    for page in doc:
+        full_text += page.get_text()
+
+    fields = extract_fields(full_text)
+    images = extract_images(pdf_bytes)
+
     st.subheader("📋 Extracted RFQ Fields")
 
     for k, v in fields.items():
         st.markdown(f"**{k}:** {v}")
 
-    # -------- ATTACHMENTS --------
     st.subheader("📎 Attachments")
-    st.write(f"Attached Photos: **{len(images)} found**")
+    st.write(f"Attached photos found: **{len(images)}**")
 
-    # -------- IMAGE PREVIEW --------
     if images:
         st.subheader("🖼️ Attached Photos")
         cols = st.columns(3)
@@ -79,26 +85,23 @@ if uploaded_file:
             image = Image.open(io.BytesIO(img["bytes"]))
             cols[i % 3].image(
                 image,
-                caption=f"Page {img['page']} – Image {img['index']}",
+                caption=f"Photo – Page {img['page']}",
                 use_container_width=True
             )
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zipf:
+            for i, img in enumerate(images):
+                zipf.writestr(
+                    f"photo_{i+1}_page_{img['page']}.{img['ext']}",
+                    img["bytes"]
+                )
+
+        st.download_button(
+            "⬇️ Download Attached Photos (ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="attached_photos.zip",
+            mime="application/zip"
+        )
     else:
-        st.info("No images found in document.")
-
-    # -------- IMAGE DOWNLOAD --------
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for img in images:
-            name = f"page_{img['page']}_image_{img['index']}.{img['ext']}"
-            zipf.writestr(name, img["bytes"])
-
-    st.download_button(
-        "⬇️ Download Attached Photos (ZIP)",
-        data=zip_buffer.getvalue(),
-        file_name="attached_photos.zip",
-        mime="application/zip"
-    )
-
-    # -------- RAW TEXT --------
-    with st.expander("📄 Full Extracted Text (Debug View)"):
-        st.text(raw_text)
+        st.info("No photographic attachments detected.")
