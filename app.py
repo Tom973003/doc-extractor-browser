@@ -13,7 +13,9 @@ uploaded_file = st.file_uploader("Upload RFQ PDF", type=["pdf"])
 # ---------------- HELPERS ----------------
 
 def clean(text):
-    return re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return "Not found"
+    return re.sub(r"\s+", " ", str(text)).strip()
 
 def extract_fields(text):
     fields = {
@@ -32,7 +34,9 @@ def extract_fields(text):
     results = {}
     for k, pattern in fields.items():
         match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-        results[k] = clean(match.group(1)) if match else "Not found"
+        value = match.group(1) if match and match.groups() else None
+        results[k] = clean(value)
+
     return results
 
 def extract_images(pdf_bytes):
@@ -40,11 +44,10 @@ def extract_images(pdf_bytes):
     images = []
 
     for page_i, page in enumerate(doc):
-        for img_i, img in enumerate(page.get_images(full=True)):
+        for img in page.get_images(full=True):
             xref = img[0]
             base = doc.extract_image(xref)
 
-            # FILTER ICONS / TINY IMAGES
             if base["width"] < 300 or base["height"] < 300:
                 continue
 
