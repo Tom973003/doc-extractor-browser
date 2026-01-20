@@ -1,69 +1,86 @@
 import streamlit as st
-import zipfile
-import tempfile
-import os
-from pathlib import Path
-from docx import Document
-from PIL import Image
+import fitz  # PyMuPDF
 import io
+import zipfile
+from PIL import Image
 
 st.set_page_config(page_title="Document → Important Bits", layout="wide")
 
 st.title("📄 Document → Important Bits")
-st.write("Upload a Word document to extract text, images, and embedded files.")
+st.write("Upload a PDF to extract structured text and images.")
 
 uploaded_file = st.file_uploader(
-    "Upload DOCX file",
-    type=["docx"],
+    "Upload PDF",
+    type=["pdf"],
+    accept_multiple_files=False
 )
 
+def extract_text_and_images(pdf_bytes):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    text_blocks = []
+    images = []
+
+    for page_number, page in enumerate(doc, start=1):
+        # ---- TEXT ----
+        text = page.get_text("text")
+        if text.strip():
+            text_blocks.append(f"### Page {page_number}\n{text}")
+
+        # ---- IMAGES ----
+        for img_index, img in enumerate(page.get_images(full=True)):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            image_bytes = base_image["image"]
+            image_ext = base_image["ext"]
+
+            images.append({
+                "page": page_number,
+                "index": img_index,
+                "bytes": image_bytes,
+                "ext": image_ext
+            })
+
+    return text_blocks, images
+
 if uploaded_file:
+    pdf_bytes = uploaded_file.read()
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        docx_path = Path(tmpdir) / uploaded_file.name
-        docx_path.write_bytes(uploaded_file.read())
+    with st.spinner("Extracting content..."):
+        text_blocks, images = extract_text_and_images(pdf_bytes)
 
-        doc = Document(docx_path)
+    # ---------- TEXT OUTPUT ----------
+    st.subheader("📝 Extracted Text")
+    for block in text_blocks:
+        st.markdown(block)
 
-        # ---------------- TEXT ----------------
-        st.header("📝 Extracted Text")
-        for para in doc.paragraphs:
-            if para.text.strip():
-                st.write(para.text)
+    # ---------- IMAGES ----------
+    st.subheader("🖼️ Extracted Images")
 
-        # ---------------- IMAGES ----------------
-        st.header("🖼 Extracted Images")
-        image_count = 0
+    if images:
+        cols = st.columns(3)
+        for i, img in enumerate(images):
+            image = Image.open(io.BytesIO(img["bytes"]))
+            cols[i % 3].image(
+                image,
+                caption=f"Page {img['page']} – Image {img['index'] + 1}",
+                use_container_width=True
+            )
+    else:
+        st.info("No images found in this document.")
 
-        with zipfile.ZipFile(docx_path) as z:
-            for name in z.namelist():
-                if name.startswith("word/media/"):
-                    image_bytes = z.read(name)
-                    image = Image.open(io.BytesIO(image_bytes))
-                    st.image(image, caption=name.split("/")[-1], use_container_width=True)
-                    image_count += 1
+    # ---------- DOWNLOAD ZIP ----------
+    st.subheader("⬇️ Download Images")
 
-        if image_count == 0:
-            st.info("No images found in this document.")
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for img in images:
+            filename = f"page_{img['page']}_image_{img['index'] + 1}.{img['ext']}"
+            zip_file.writestr(filename, img["bytes"])
 
-        # ---------------- EMBEDDED FILES ----------------
-        st.header("📎 Embedded Files (Downloads)")
-
-        embedded_found = False
-
-        with zipfile.ZipFile(docx_path) as z:
-            for name in z.namelist():
-                if name.startswith("word/embeddings/"):
-                    embedded_found = True
-                    file_bytes = z.read(name)
-                    filename = Path(name).name
-
-                    st.download_button(
-                        label=f"⬇ Download {filename}",
-                        data=file_bytes,
-                        file_name=filename,
-                        mime="application/octet-stream",
-                    )
-
-        if not embedded_found:
-            st.info("No embedded files found.")
+    st.download_button(
+        label="Download all images as ZIP",
+        data=zip_buffer.getvalue(),
+        file_name="extracted_images.zip",
+        mime="application/zip"
+    )
